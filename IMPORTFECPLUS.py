@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import io
 from datetime import datetime
+import plotly.graph_objects as go
+import plotly.express as px
 
 # -------------------------------------------------
 #                 UTILITAIRES
@@ -105,7 +107,6 @@ def calc_ca_journalier_avec_trous(df_fec, start_compte, end_compte, start_date, 
             )
             work[col_montant] = pd.to_numeric(work[col_montant], errors="coerce")
         else:
-            # Si les colonnes n'existent pas c'est un vrai problème fonctionnel pour le calcul TOTAL
             work[col_montant] = 0.0
 
     # TOTAL = Crédit - Débit
@@ -136,9 +137,9 @@ def calc_ca_journalier_avec_trous(df_fec, start_compte, end_compte, start_date, 
     return df_daily_full
 
 
-def plot_ca(df_daily_full):
+def plot_ca_matplotlib(df_daily_full):
     """
-    Trace le CA quotidien (Cumul_TOTAL) dans le temps.
+    Trace le CA quotidien (Cumul_TOTAL) avec matplotlib.
     Retourne un buffer PNG.
     """
     fig, ax = plt.subplots(figsize=(14, 6))
@@ -175,7 +176,7 @@ def lire_externe(file_ext):
             dtype=str,
             encoding="utf-8",
             engine="python",
-            sep=None  # sniff automatique ; ajustable si besoin
+            sep=None  # sniff automatique ; ajustable
         )
     else:
         # Excel
@@ -241,77 +242,50 @@ def fusionner_fec_externe(df_daily_full, df_ext_with_date):
     return merged
 
 
-def plot_multiaxis_time(df_time, date_col):
+def build_plotly_timeseries(df_time, date_col, cols_to_plot):
     """
-    df_time : DataFrame final filtré par colonnes, incluant la colonne date_col (datetime)
-    On trace toutes les colonnes numériques sur des axes Y séparés (multi-axes).
-    Retourne un buffer PNG (ou None si rien à tracer).
+    Construit une figure Plotly avec plusieurs colonnes numériques tracées dans le temps.
+    On ne fait pas de multi-axes Y pour garder quelque chose de lisible/robuste.
     """
-    # Isoler les colonnes numériques
-    numeric_cols = df_time.select_dtypes(include=[np.number]).columns.tolist()
+    fig = go.Figure()
+    for col in cols_to_plot:
+        if col == date_col:
+            continue
+        if pd.api.types.is_numeric_dtype(df_time[col]):
+            fig.add_trace(go.Scatter(
+                x=df_time[date_col],
+                y=df_time[col],
+                mode="lines+markers",
+                name=col
+            ))
 
-    if len(numeric_cols) == 0:
-        return None
+    fig.update_layout(
+        title="Évolution dans le temps",
+        xaxis_title="Date",
+        yaxis_title="Valeurs",
+        legend_title="Variables"
+    )
 
-    fig, ax0 = plt.subplots(figsize=(14, 7))
-
-    # première série sur l'axe principal
-    y0 = numeric_cols[0]
-    ax0.plot(df_time[date_col], df_time[y0], marker='o', linestyle='-')
-    ax0.set_xlabel("Date")
-    ax0.set_ylabel(y0)
-    ax0.tick_params(axis='y')
-    axes = [ax0]
-
-    # Les autres séries sur des axes jumeaux
-    for i, col in enumerate(numeric_cols[1:], start=1):
-        ax_new = ax0.twinx()
-        axes.append(ax_new)
-
-        # décaler l'axe vers la droite pour éviter qu'ils se superposent
-        ax_new.spines["right"].set_position(("axes", 1 + 0.08 * (i-1)))
-
-        ax_new.plot(df_time[date_col], df_time[col], marker='o', linestyle='-')
-        ax_new.set_ylabel(col)
-        ax_new.tick_params(axis='y')
-
-    plt.xticks(rotation=45)
-    plt.title("Évolution temporelle (multi-échelles)")
-    plt.tight_layout()
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png")
-    buf.seek(0)
-    plt.close(fig)
-    return buf
+    return fig
 
 
-def plot_corr_heatmap(df_num):
+def build_plotly_corr_heatmap(df_num):
     """
-    Trace une heatmap de corrélation (Pearson) sans seaborn.
-    Retourne (buffer PNG, matrice_corr).
+    Calcule la matrice de corrélation et renvoie une figure Plotly heatmap.
     """
-    corr = df_num.corr(method='pearson')
+    corr = df_num.corr(method="pearson")
 
-    fig, ax = plt.subplots(figsize=(8, 6))
-    im = ax.imshow(corr.values, aspect='auto')
-    ax.set_xticks(range(len(corr.columns)))
-    ax.set_yticks(range(len(corr.columns)))
-    ax.set_xticklabels(corr.columns, rotation=45, ha='right')
-    ax.set_yticklabels(corr.columns)
+    fig = px.imshow(
+        corr,
+        text_auto=True,
+        aspect="auto",
+        color_continuous_scale="RdBu_r",
+        zmin=-1,
+        zmax=1,
+        title="Matrice de corrélations (Pearson)"
+    )
 
-    cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label("Corrélation de Pearson", rotation=90)
-
-    ax.set_title("Matrice de corrélations")
-    plt.tight_layout()
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png")
-    buf.seek(0)
-    plt.close(fig)
-
-    return buf, corr
+    return fig, corr
 
 
 # -------------------------------------------------
@@ -402,8 +376,8 @@ if st.session_state.df_fec is not None:
         st.subheader("CA Journalier (avec jours vides à 0)")
         st.dataframe(st.session_state.df_daily_full)
 
-        # Graphique CA seul
-        img_buf = plot_ca(st.session_state.df_daily_full)
+        # Graphique CA seul (matplotlib simple)
+        img_buf = plot_ca_matplotlib(st.session_state.df_daily_full)
         st.image(img_buf, caption="Cumul TOTAL journalier (FEC)")
 
         # Export Excel du CA journalier seul
@@ -458,7 +432,7 @@ if st.session_state.df_ext is not None:
             )
             st.session_state.merged = merged
 
-# ----------------- ÉTAPE 3 : ANALYSE -----------------
+# ----------------- ÉTAPE 3 : ANALYSE / VIZ -----------------
 
 if st.session_state.merged is not None:
     st.header("Étape 3 : Analyse, sélection de colonnes, téléchargement, graphiques")
@@ -466,12 +440,11 @@ if st.session_state.merged is not None:
     st.subheader("Résultat fusionné FEC + Externe (brut)")
     st.dataframe(st.session_state.merged.head())
 
-    st.markdown("### Sélection des colonnes à garder pour l'analyse")
+    st.markdown("### Colonnes à conserver dans le dataset final")
     all_cols = list(st.session_state.merged.columns)
 
-    # multiselect avec toutes les colonnes cochées par défaut
     cols_keep = st.multiselect(
-        "Colonnes à conserver dans le dataset final :",
+        "Colonnes du dataset final :",
         options=all_cols,
         default=all_cols,
         key="cols_keep_select"
@@ -483,7 +456,7 @@ if st.session_state.merged is not None:
         # Dataset filtré par l'utilisateur
         df_final = st.session_state.merged[cols_keep].copy()
 
-        # Forcer la présence d'une colonne date pour analyse temporelle
+        # Assurer une colonne de temps pour la suite
         if "EcritureDate" in st.session_state.merged.columns and "EcritureDate" not in df_final.columns:
             df_final["EcritureDate"] = st.session_state.merged["EcritureDate"]
 
@@ -493,7 +466,7 @@ if st.session_state.merged is not None:
         st.subheader("Dataset final filtré")
         st.dataframe(df_final)
 
-        # Téléchargement du dataset filtré
+        # Fichier téléchargeable = df_final
         excel_buf_filtered = io.BytesIO()
         df_final.to_excel(excel_buf_filtered, index=False)
         excel_buf_filtered.seek(0)
@@ -505,39 +478,78 @@ if st.session_state.merged is not None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-        # -------- Graphique multi-axes dans le temps --------
-        st.markdown("### Graphique multi-indicateurs dans le temps")
+        # ---------------- GRAPH TEMPOREL ----------------
+        st.markdown("### Graphique multi-indicateurs (Plotly)")
 
-        # Choix de la colonne de temps pour le tracé
-        # Priorité EcritureDate, sinon Date
-        date_col_for_plot = None
+        # choix de la colonne date pour l'axe X
         if "EcritureDate" in df_final.columns:
-            date_col_for_plot = "EcritureDate"
+            default_date_col = "EcritureDate"
         elif "Date" in df_final.columns:
-            date_col_for_plot = "Date"
-
-        if date_col_for_plot is not None:
-            # S'assurer que la colonne date est bien en datetime
-            df_time = df_final.copy()
-            df_time[date_col_for_plot] = pd.to_datetime(df_time[date_col_for_plot], errors='coerce')
-
-            buf_multi = plot_multiaxis_time(df_time, date_col_for_plot)
-            if buf_multi is not None:
-                st.image(buf_multi, caption="Séries alignées sur plusieurs axes Y")
-            else:
-                st.info("Aucune colonne numérique à tracer.")
+            default_date_col = "Date"
         else:
-            st.info("Pas de colonne date ('EcritureDate' ou 'Date') disponible pour tracer l'évolution temporelle.")
+            default_date_col = None
 
-        # -------- Heatmap de corrélation --------
-        st.markdown("### Matrice de corrélations (Pearson)")
+        if default_date_col is not None:
+            date_col_for_plot = st.selectbox(
+                "Colonne date pour l'axe X :",
+                options=[c for c in df_final.columns if c in ["EcritureDate", "Date"]],
+                index=0 if "EcritureDate" in [c for c in df_final.columns if c in ["EcritureDate", "Date"]] else 0,
+                key="date_for_plot_select"
+            )
+
+            # On force le type datetime pour l'axe X
+            df_plot = df_final.copy()
+            df_plot[date_col_for_plot] = pd.to_datetime(df_plot[date_col_for_plot], errors="coerce")
+
+            # choix des colonnes numériques à tracer
+            numeric_cols_all = [
+                c for c in df_plot.columns
+                if c != date_col_for_plot and pd.api.types.is_numeric_dtype(df_plot[c])
+            ]
+
+            cols_for_chart = st.multiselect(
+                "Quelles colonnes numériques afficher sur le graphique temporel ?",
+                options=numeric_cols_all,
+                default=numeric_cols_all,
+                key="cols_for_chart_select"
+            )
+
+            if len(cols_for_chart) == 0:
+                st.info("Sélectionne au moins une colonne numérique pour tracer.")
+            else:
+                fig_timeseries = build_plotly_timeseries(
+                    df_plot,
+                    date_col_for_plot,
+                    [date_col_for_plot] + cols_for_chart  # on lui fournit la date + les séries
+                )
+                st.plotly_chart(fig_timeseries, use_container_width=True)
+        else:
+            st.info("Aucune colonne de date détectée pour tracer l'évolution temporelle.")
+
+        # ---------------- HEATMAP CORRÉLATIONS ----------------
+        st.markdown("### Heatmap de corrélations (Plotly)")
+
+        # On ne prend que les colonnes numériques du df_final filtré
         df_num = df_final.select_dtypes(include=[float, int])
 
         if df_num.shape[1] < 2:
             st.info("Pas assez de colonnes numériques pour calculer une matrice de corrélations.")
         else:
-            buf_heatmap, corr_matrix = plot_corr_heatmap(df_num)
-            st.image(buf_heatmap, caption="Corrélations entre variables numériques")
+            # on laisse l'utilisateur choisir quelles colonnes numériques inclure dans la heatmap
+            cols_for_corr = st.multiselect(
+                "Colonnes numériques à inclure dans la matrice de corrélations :",
+                options=list(df_num.columns),
+                default=list(df_num.columns),
+                key="cols_for_corr_select"
+            )
 
-            st.write("Tableau des corrélations :")
-            st.dataframe(corr_matrix.round(3))
+            if len(cols_for_corr) < 2:
+                st.info("Choisis au moins deux colonnes numériques pour la corrélation.")
+            else:
+                df_num_sub = df_num[cols_for_corr].copy()
+                fig_corr, corr_matrix = build_plotly_corr_heatmap(df_num_sub)
+
+                st.plotly_chart(fig_corr, use_container_width=True)
+
+                st.write("Tableau des corrélations :")
+                st.dataframe(corr_matrix.round(3))
