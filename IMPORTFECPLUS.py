@@ -459,7 +459,7 @@ if st.session_state.merged is not None:
         st.subheader("Dataset final filtré")
         st.dataframe(df_final)
 
-        # 1.b Export téléchargeable = exactement df_final affiché
+        # Export téléchargeable = exactement df_final affiché
         excel_buf_filtered = io.BytesIO()
         df_final.to_excel(excel_buf_filtered, index=False)
         excel_buf_filtered.seek(0)
@@ -472,13 +472,12 @@ if st.session_state.merged is not None:
         )
 
         # =========================
-        # 2. Préparation commune pour les graphes
+        # PARTIE GRAPHIQUE TEMPOREL MULTI-AXES
         # =========================
 
-        st.markdown("### Graphique multi-indicateurs (Plotly)")
+        st.markdown("### Graphique multi-indicateurs (Plotly, échelles séparées)")
 
-        # On laisse l'utilisateur CHOISIR lui-même la colonne temps
-        # -> aucune colonne n'est imposée. Si tu as retiré 'Date', elle ne sera pas proposée.
+        # 1. Choisir quelle colonne représente le temps (axe X)
         candidate_date_cols = list(df_final.columns)
         date_col_for_plot = st.selectbox(
             "Colonne date pour l'axe X :",
@@ -486,35 +485,34 @@ if st.session_state.merged is not None:
             key="date_for_plot_select"
         )
 
-        # On crée df_plot = copie de df_final qui servira pour graphes + corr
+        # Copie de travail
         df_plot = df_final.copy()
 
-        # 1. Convertir la colonne date choisie en datetime
+        # Convertir la colonne de temps en datetime
         df_plot[date_col_for_plot] = pd.to_datetime(df_plot[date_col_for_plot], errors="coerce")
 
-        # 2. Convertir toutes les autres colonnes en numérique si possible
+        # Triage par date + drop NaT
+        df_plot = df_plot.sort_values(by=date_col_for_plot)
+        df_plot = df_plot.dropna(subset=[date_col_for_plot])
+
+        # 2. Convertir toutes les autres colonnes en numérique si possible (pour pouvoir les tracer proprement)
         df_plot_converted = df_plot.copy()
         for col in df_plot_converted.columns:
             if col == date_col_for_plot:
                 continue
             if df_plot_converted[col].dtype == object:
-                # tentative de conversion style FR "12,34"
                 df_plot_converted[col] = df_plot_converted[col].str.replace(",", ".", regex=False)
                 df_plot_converted[col] = df_plot_converted[col].str.replace(" ", "", regex=False)
             df_plot_converted[col] = pd.to_numeric(df_plot_converted[col], errors="coerce")
 
-        # Lignes où la date est NaT => inutilisables pour une série temporelle
-        df_plot_converted = df_plot_converted.sort_values(by=date_col_for_plot)
-        df_plot_converted = df_plot_converted.dropna(subset=[date_col_for_plot])
-
-        # 3. Colonnes numériques dispo après conversion
+        # 3. Colonnes candidates au tracé = colonnes numériques
         numeric_cols_all = [
             c for c in df_plot_converted.columns
             if c != date_col_for_plot and pd.api.types.is_numeric_dtype(df_plot_converted[c])
         ]
 
         cols_for_chart = st.multiselect(
-            "Quelles colonnes numériques afficher dans le graphique temporel (normalisées 0-1) ?",
+            "Quelles colonnes afficher (chacune aura sa propre échelle Y) ?",
             options=numeric_cols_all,
             default=numeric_cols_all,
             key="cols_for_chart_select"
@@ -523,47 +521,72 @@ if st.session_state.merged is not None:
         if len(cols_for_chart) == 0:
             st.info("Sélectionne au moins une colonne numérique pour tracer.")
         else:
-            # =========================
-            # normalisation min-max par colonne
-            # =========================
-            df_norm = pd.DataFrame()
-            df_norm[date_col_for_plot] = df_plot_converted[date_col_for_plot]
+            # Construction dynamique d'axes yaxis, yaxis2, yaxis3...
+            fig_multi = go.Figure()
 
-            for col in cols_for_chart:
-                serie = df_plot_converted[col].astype(float)
-                col_min = serie.min()
-                col_max = serie.max()
-                # éviter division par zéro si col constante
-                if pd.isna(col_min) or pd.isna(col_max) or col_max == col_min:
-                    df_norm[col] = 0.0
+            # Axe Y principal (gauche) pour la première série
+            # Les suivantes iront à droite, décalées.
+            for i, col in enumerate(cols_for_chart):
+                if i == 0:
+                    # première série -> yaxis standard (à gauche)
+                    fig_multi.add_trace(go.Scatter(
+                        x=df_plot_converted[date_col_for_plot],
+                        y=df_plot_converted[col],
+                        mode="lines+markers",
+                        name=col,
+                        yaxis="y"  # yaxis implicite
+                    ))
                 else:
-                    df_norm[col] = (serie - col_min) / (col_max - col_min)
+                    # axes secondaires à droite
+                    axis_name = f"y{i+1}"      # y2, y3, y4...
+                    fig_multi.add_trace(go.Scatter(
+                        x=df_plot_converted[date_col_for_plot],
+                        y=df_plot_converted[col],
+                        mode="lines+markers",
+                        name=col,
+                        yaxis=axis_name
+                    ))
 
-            # Construction de la figure Plotly normalisée
-            fig_timeseries = go.Figure()
-            for col in cols_for_chart:
-                fig_timeseries.add_trace(go.Scatter(
-                    x=df_norm[date_col_for_plot],
-                    y=df_norm[col],
-                    mode="lines+markers",
-                    name=col
-                ))
+            # Maintenant on construit la mise en page pour tous les axes Y
+            layout_yaxes = {
+                "yaxis": dict(
+                    title=cols_for_chart[0],
+                    anchor="x",
+                    side="left",
+                    position=0.0,
+                    showgrid=True
+                )
+            }
 
-            fig_timeseries.update_layout(
-                title="Évolution normalisée dans le temps (0 = min / 1 = max par série)",
-                xaxis_title="Date",
-                yaxis_title="Valeur normalisée",
-                legend_title="Variables comparées"
+            # on empile les axes secondaires sur la droite, légèrement décalés
+            # position = 1.0, 1.08, 1.16, etc.
+            for i, col in enumerate(cols_for_chart[1:], start=1):
+                axis_name = f"yaxis{i+1}"    # yaxis2, yaxis3...
+                layout_yaxes[axis_name] = dict(
+                    title=col,
+                    anchor="free",
+                    overlaying="y",
+                    side="right",
+                    position=1.0 + 0.08*(i-1),  # décale les axes pour éviter la superposition
+                    showgrid=False
+                )
+
+            fig_multi.update_layout(
+                title="Évolution temporelle (échelles séparées par variable)",
+                xaxis=dict(title="Date"),
+                **layout_yaxes,
+                legend=dict(title="Variables")
             )
 
-            st.plotly_chart(fig_timeseries, use_container_width=True)
+            st.plotly_chart(fig_multi, use_container_width=True)
 
         # =========================
-        # 3. Heatmap de corrélations
+        # HEATMAP DE CORRÉLATIONS
         # =========================
+
         st.markdown("### Heatmap de corrélations (Plotly)")
 
-        # On repart des colonnes numériques converties (df_plot_converted)
+        # On repart des colonnes numériques converties pour être cohérent
         numeric_cols_all_after_conv = [
             c for c in df_plot_converted.columns
             if c != date_col_for_plot and pd.api.types.is_numeric_dtype(df_plot_converted[c])
