@@ -453,10 +453,11 @@ if st.session_state.merged is not None:
     if len(cols_keep) == 0:
         st.warning("Sélectionne au moins une colonne.")
     else:
-        # Dataset filtré par l'utilisateur
+        # 1. Dataset final utilisateur
         df_final = st.session_state.merged[cols_keep].copy()
 
-        # Assurer une colonne de temps pour la suite
+        # 1.a On impose une colonne de date (sinon pas de timeline)
+        # priorité à EcritureDate (datetime), sinon Date (date pure)
         if "EcritureDate" in st.session_state.merged.columns and "EcritureDate" not in df_final.columns:
             df_final["EcritureDate"] = st.session_state.merged["EcritureDate"]
 
@@ -466,7 +467,7 @@ if st.session_state.merged is not None:
         st.subheader("Dataset final filtré")
         st.dataframe(df_final)
 
-        # Fichier téléchargeable = df_final
+        # 1.b Export téléchargeable = exactement df_final affiché
         excel_buf_filtered = io.BytesIO()
         df_final.to_excel(excel_buf_filtered, index=False)
         excel_buf_filtered.seek(0)
@@ -478,35 +479,59 @@ if st.session_state.merged is not None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-        # ---------------- GRAPH TEMPOREL ----------------
-        st.markdown("### Graphique multi-indicateurs (Plotly)")
+        # =========================
+        # 2. Préparation pour les graphes
+        # =========================
 
-        # choix de la colonne date pour l'axe X
+        # Détection de la colonne date à utiliser pour l'axe X
+        candidate_date_cols = []
         if "EcritureDate" in df_final.columns:
-            default_date_col = "EcritureDate"
-        elif "Date" in df_final.columns:
-            default_date_col = "Date"
-        else:
-            default_date_col = None
+            candidate_date_cols.append("EcritureDate")
+        if "Date" in df_final.columns and "Date" not in candidate_date_cols:
+            candidate_date_cols.append("Date")
 
-        if default_date_col is not None:
+        if len(candidate_date_cols) > 0:
             date_col_for_plot = st.selectbox(
                 "Colonne date pour l'axe X :",
-                options=[c for c in df_final.columns if c in ["EcritureDate", "Date"]],
-                index=0 if "EcritureDate" in [c for c in df_final.columns if c in ["EcritureDate", "Date"]] else 0,
+                options=candidate_date_cols,
+                index=0,
                 key="date_for_plot_select"
             )
 
-            # On force le type datetime pour l'axe X
+            # On crée df_plot = copie de df_final qui servira pour les graphes
             df_plot = df_final.copy()
+
+            # Convertir la colonne date choisie en datetime (si pas déjà)
             df_plot[date_col_for_plot] = pd.to_datetime(df_plot[date_col_for_plot], errors="coerce")
 
-            # choix des colonnes numériques à tracer
+            # ======================================
+            # Conversion automatique des colonnes non-date en numérique si possible
+            # (pour que température, fréquentation, etc. deviennent vraiment numériques)
+            # ======================================
+
+            df_plot_converted = df_plot.copy()
+            for col in df_plot_converted.columns:
+                if col == date_col_for_plot:
+                    continue
+                # tentative de conversion en float
+                if df_plot_converted[col].dtype == object:
+                    # remplacer virgules FR par points si besoin
+                    df_plot_converted[col] = df_plot_converted[col].str.replace(",", ".", regex=False)
+                    df_plot_converted[col] = df_plot_converted[col].str.replace(" ", "", regex=False)
+                # convertir en numérique si possible
+                df_plot_converted[col] = pd.to_numeric(df_plot_converted[col], errors="coerce")
+
+            # =========================
+            # 3. Sélection des colonnes à tracer dans le temps
+            # =========================
+
+            # On considère "numériques" toutes les colonnes qui sont maintenant dtype number
             numeric_cols_all = [
-                c for c in df_plot.columns
-                if c != date_col_for_plot and pd.api.types.is_numeric_dtype(df_plot[c])
+                c for c in df_plot_converted.columns
+                if c != date_col_for_plot and pd.api.types.is_numeric_dtype(df_plot_converted[c])
             ]
 
+            st.markdown("### Graphique multi-indicateurs (Plotly)")
             cols_for_chart = st.multiselect(
                 "Quelles colonnes numériques afficher sur le graphique temporel ?",
                 options=numeric_cols_all,
@@ -517,39 +542,65 @@ if st.session_state.merged is not None:
             if len(cols_for_chart) == 0:
                 st.info("Sélectionne au moins une colonne numérique pour tracer.")
             else:
-                fig_timeseries = build_plotly_timeseries(
-                    df_plot,
-                    date_col_for_plot,
-                    [date_col_for_plot] + cols_for_chart  # on lui fournit la date + les séries
+                # Construction de la figure Plotly
+                fig_timeseries = go.Figure()
+                for col in cols_for_chart:
+                    fig_timeseries.add_trace(go.Scatter(
+                        x=df_plot_converted[date_col_for_plot],
+                        y=df_plot_converted[col],
+                        mode="lines+markers",
+                        name=col
+                    ))
+
+                fig_timeseries.update_layout(
+                    title="Évolution dans le temps",
+                    xaxis_title="Date",
+                    yaxis_title="Valeurs",
+                    legend_title="Variables"
                 )
+
                 st.plotly_chart(fig_timeseries, use_container_width=True)
-        else:
-            st.info("Aucune colonne de date détectée pour tracer l'évolution temporelle.")
 
-        # ---------------- HEATMAP CORRÉLATIONS ----------------
-        st.markdown("### Heatmap de corrélations (Plotly)")
+            # =========================
+            # 4. Heatmap des corrélations
+            # =========================
+            st.markdown("### Heatmap de corrélations (Plotly)")
 
-        # On ne prend que les colonnes numériques du df_final filtré
-        df_num = df_final.select_dtypes(include=[float, int])
+            # Re-détection des colonnes numériques sur df_plot_converted (pour être cohérent)
+            numeric_cols_all_after_conv = [
+                c for c in df_plot_converted.columns
+                if c != date_col_for_plot and pd.api.types.is_numeric_dtype(df_plot_converted[c])
+            ]
 
-        if df_num.shape[1] < 2:
-            st.info("Pas assez de colonnes numériques pour calculer une matrice de corrélations.")
-        else:
-            # on laisse l'utilisateur choisir quelles colonnes numériques inclure dans la heatmap
-            cols_for_corr = st.multiselect(
-                "Colonnes numériques à inclure dans la matrice de corrélations :",
-                options=list(df_num.columns),
-                default=list(df_num.columns),
-                key="cols_for_corr_select"
-            )
-
-            if len(cols_for_corr) < 2:
-                st.info("Choisis au moins deux colonnes numériques pour la corrélation.")
+            if len(numeric_cols_all_after_conv) < 2:
+                st.info("Pas assez de colonnes numériques pour calculer une matrice de corrélations.")
             else:
-                df_num_sub = df_num[cols_for_corr].copy()
-                fig_corr, corr_matrix = build_plotly_corr_heatmap(df_num_sub)
+                cols_for_corr = st.multiselect(
+                    "Colonnes numériques à inclure dans la matrice de corrélations :",
+                    options=numeric_cols_all_after_conv,
+                    default=numeric_cols_all_after_conv,
+                    key="cols_for_corr_select"
+                )
 
-                st.plotly_chart(fig_corr, use_container_width=True)
+                if len(cols_for_corr) < 2:
+                    st.info("Choisis au moins deux colonnes numériques pour la corrélation.")
+                else:
+                    df_num_sub = df_plot_converted[cols_for_corr].copy()
+                    corr = df_num_sub.corr(method="pearson")
 
-                st.write("Tableau des corrélations :")
-                st.dataframe(corr_matrix.round(3))
+                    fig_corr = px.imshow(
+                        corr,
+                        text_auto=True,
+                        aspect="auto",
+                        color_continuous_scale="RdBu_r",
+                        zmin=-1,
+                        zmax=1,
+                        title="Matrice de corrélations (Pearson)"
+                    )
+
+                    st.plotly_chart(fig_corr, use_container_width=True)
+
+                    st.write("Tableau des corrélations :")
+                    st.dataframe(corr.round(3))
+        else:
+            st.info("Pas de colonne date ('EcritureDate' ou 'Date') disponible dans le dataset final pour tracer l'évolution temporelle.")
